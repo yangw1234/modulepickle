@@ -64,10 +64,10 @@ class Package():
         self.install()
         return importlib.import_module(name)
 
-def compress(packagename):
+def compress(packagename, path):
     tar = BytesIO()
     with TarFile(fileobj=tar, mode='w') as tf:
-        tf.add(packagename, packagename)
+        tf.add(path, packagename)
     #TODO: This was originally gzipped, but the gzipped value seems to change on repeated compressions, breaking hashing.
     # Looks like the issue is a timestamp that can be overriden with a parameter, but let's leave it uncompressed for now.
     return tar.getvalue()
@@ -87,8 +87,29 @@ def is_local(module):
     # If the module is in the current working directory, 
     # and it doesn't have `site-packages` in it's path (which probably means it's part of a local virtualenv)
     # assume it's local and that it's cool to pickle it.
+    path = getattr(module, '__file__', None)
+    
+    # sys.executable = $python_lib_path/bin/python
+    python_lib_path = sys.executable[:-len("/bin/python")]
+    
+    if path is None:
+        return False
+    
+    if path.startswith(python_lib_path):
+        return False
+        
+    
+    return True
+
+def get_path(module):
     path = getattr(module, '__file__', '')
-    return path.startswith(os.getcwd()) and ('site-packages' not in path)
+    package_name = module.__name__
+    package_path_part = package_name.replace(".", "/")
+    package_first_part = package_path_part.split("/")[0]
+    idx = path.index(package_path_part)
+    import os
+    package_path = os.path.join(path[:idx], package_first_part)
+    return package_path
 
 def extend(base):
     """Create a Pickler that can pickle packages by inheriting from `base`
@@ -106,17 +127,19 @@ def extend(base):
             super().__init__(*args, **kwargs)
             self.packages = {}
 
-        def compress_package(self, name):
+        def compress_package(self, name, path):
             # The same package might contain many of the modules a function references, so it makes sense to cache them
             # as we go.
             if name not in self.packages:
-                compressed = compress(name)
+                compressed = compress(name, path)
                 self.packages[name] = Package(name, compressed)
             return self.packages[name]
         
         def save_module(self, obj):
+
             if is_local(obj):
-                args = (obj.__name__, self.compress_package(packagename(obj)))
+                print("get local {} in save_module, path is {}".format(obj.__name__, obj.__file__))
+                args = (obj.__name__, self.compress_package(packagename(obj), get_path(obj)))
                 return self.save_reduce(import_compressed, args, obj=obj)
             else:
                 return super().save_module(obj)
@@ -124,6 +147,7 @@ def extend(base):
         dispatch[types.ModuleType] = save_module
 
         def save_global(self, obj, *args, **kwargs):
+
             module = sys.modules[obj.__module__]
             # This is a dumb trick to handle my incomprehension of pickletools.
             # The problem is that sometimes a global will be unpickled before it's module is, which will throw an error.
@@ -133,8 +157,8 @@ def extend(base):
                 args = (module, obj)
                 return self.save_reduce(import_global, args, obj=obj)
             return super().save_global(obj, *args, **kwargs)
+
         dispatch[type] = save_global
-        dispatch[types.ClassType] = save_global
     
     return ModulePickler
 
